@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Pannellum 硬截圖（readPixels→2D）</title>
+
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/pannellum@2.5.6/build/pannellum.css">
+<style>
+  html,body{height:100%;margin:0;background:#0f172a;color:#e2e8f0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Noto Sans TC","Helvetica Neue",Arial,sans-serif}
+  #panorama{position:absolute;inset:0}
+  .header{position:fixed;top:12px;left:50%;transform:translateX(-50%);background:rgba(15,23,42,.6);padding:8px 12px;border-radius:12px;backdrop-filter:blur(6px);z-index:20;font-size:14px}
+  .credit{position:fixed;right:12px;bottom:12px;font-size:12px;opacity:.7;z-index:10}
+  .btn{position:fixed;right:12px;bottom:60px;padding:8px 12px;background:rgba(30,41,59,.85);color:#fff;border:none;border-radius:10px;cursor:pointer;z-index:20}
+  .btn:hover{background:rgba(59,130,246,.9)}
+  .badge{position:fixed;left:12px;bottom:12px;background:rgba(15,23,42,.6);border:1px solid rgba(148,163,184,.25);padding:6px 8px;border-radius:10px;font-size:12px;opacity:.85;z-index:20}
+  .badge[hidden]{display:none}
+
+  .preview{position:fixed;right:12px;bottom:120px;width:280px;background:rgba(15,23,42,.95);border:1px solid rgba(148,163,184,.25);border-radius:14px;box-shadow:0 10px 30px rgba(0,0,0,.35);display:none;overflow:hidden;backdrop-filter:blur(6px);z-index:30}
+  .preview-header{display:flex;justify-content:space-between;align-items:center;padding:8px 10px;border-bottom:1px solid rgba(148,163,184,.2);font-size:13px}
+  .preview-body{padding:10px}
+  .preview-img{width:100%;aspect-ratio:16/9;object-fit:cover;border-radius:10px;background:#111827}
+  .preview-actions{display:flex;gap:8px;padding:10px}
+  .btn-ghost,.btn-primary{flex:1;padding:8px 10px;border:none;border-radius:10px;cursor:pointer}
+  .btn-ghost{background:rgba(51,65,85,.85);color:#e5e7eb}
+  .btn-ghost:hover{background:rgba(71,85,105,.9)}
+  .btn-primary{background:rgba(59,130,246,.9);color:#fff;text-align:center;text-decoration:none}
+  .btn-primary:hover{background:rgba(37,99,235,.95)}
+  .close-x{appearance:none;border:none;background:transparent;color:#94a3b8;font-size:18px;line-height:1;cursor:pointer;padding:2px 6px;border-radius:6px}
+  .close-x:hover{background:rgba(148,163,184,.15);color:#e2e8f0}
+</style>
+</head>
+<body>
+  <div class="header">拖曳旋轉、滑輪縮放｜此頁用 readPixels 硬擷取（避免黑屏）</div>
+  <div id="panorama"></div>
+  <div class="credit">Powered by pannellum</div>
+  <div id="statusBadge" class="badge" hidden>載入中…</div>
+  <button id="captureBtn" class="btn">📷 拍照</button>
+
+  <div id="previewCard" class="preview" aria-live="polite">
+    <div class="preview-header">
+      <div>拍照預覽</div>
+      <button id="closePreview" class="close-x" title="關閉">✕</button>
+    </div>
+    <div class="preview-body">
+      <img id="previewImg" class="preview-img" alt="擷取預覽">
+    </div>
+    <div class="preview-actions">
+      <button id="retakeBtn" class="btn-ghost">關閉</button>
+      <a id="downloadBtn" class="btn-primary" download>下載</a>
+    </div>
+  </div>
+
+  <!--（可選）猴補：保留繪圖緩衝，進一步降低黑屏風險 -->
+  <script>
+    (function monkeyPatchPreserveDrawingBuffer(){
+      const orig = HTMLCanvasElement.prototype.getContext;
+      HTMLCanvasElement.prototype.getContext = function(type, attrs){
+        if (type === 'webgl' || type === 'experimental-webgl') {
+          attrs = Object.assign({}, attrs, { preserveDrawingBuffer: true });
+        }
+        return orig.call(this, type, attrs);
+      };
+    })();
+  </script>
+
+  <script src="https://cdn.jsdelivr.net/npm/pannellum@2.5.6/build/pannellum.js"></script>
+  <script>
+    // ===== 你的全景圖路徑（建議同源） =====
+    const imageUrl = 'panorama_mei.jpg';
+
+    // ===== 建立 Pannellum viewer =====
+    const viewer = pannellum.viewer('panorama', {
+      type: 'equirectangular',
+      panorama: imageUrl,
+      autoLoad: true,
+      showZoomCtrl: true,
+      showFullscreenCtrl: true,
+      hfov: 100, minHfov: 50, maxHfov: 120,
+      pitch: 0, yaw: 0,
+      backgroundColor: [15, 23, 42]
+    });
+    window.viewer = viewer; // 方便你開 Console 測試
+
+    // ===== DOM =====
+    const badge = document.getElementById('statusBadge');
+    const captureBtn  = document.getElementById('captureBtn');
+    const previewCard = document.getElementById('previewCard');
+    const previewImg  = document.getElementById('previewImg');
+    const closeBtn    = document.getElementById('closePreview');
+    const retakeBtn   = document.getElementById('retakeBtn');
+    const downloadBtn = document.getElementById('downloadBtn');
+
+    let currentBlobUrl = null;
+    function setBadge(text, show=true){ badge.textContent = text; badge.hidden = !show; }
+    function showPreviewWithBlob(blob){
+      if (currentBlobUrl) URL.revokeObjectURL(currentBlobUrl);
+      currentBlobUrl = URL.createObjectURL(blob);
+      previewImg.src = currentBlobUrl;
+      const ts = new Date().toISOString().replace(/[:.]/g,'-');
+      downloadBtn.href = currentBlobUrl;
+      downloadBtn.download = `panorama_capture_${ts}.png`;
+      previewCard.style.display = 'block';
+    }
+    function hidePreview(){
+      previewCard.style.display = 'none';
+      if (currentBlobUrl) URL.revokeObjectURL(currentBlobUrl);
+      currentBlobUrl = null;
+      previewImg.removeAttribute('src');
+      downloadBtn.removeAttribute('href');
+    }
+
+    // ===== 硬截圖：readPixels → 2D canvas → Blob =====
+    async function hardCapturePannellum(v){
+      const r = v.getRenderer?.();
+      if (!r || !r.getCanvas) throw new Error('無法取得 renderer/canvas');
+      const glCanvas = r.getCanvas();
+      const gl = glCanvas.getContext('webgl') || glCanvas.getContext('experimental-webgl');
+      if (!gl) throw new Error('沒有 WebGL context');
+
+      const W = glCanvas.width, H = glCanvas.height;
+      if (!W || !H) throw new Error('Canvas 尺寸為 0');
+
+      // 先渲染一幀，再在同一幀讀像素
+      r.render?.();
+      await new Promise(requestAnimationFrame);
+
+      const pixels = new Uint8Array(W * H * 4);
+      try {
+        gl.readPixels(0, 0, W, H, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+      } catch (e) {
+        // 若這裡丟 SecurityError，代表真・CORS 汙染，任何方法都不能讀
+        throw new Error('readPixels 失敗：' + (e && e.message ? e.message : e));
+      }
+
+      // WebGL 原點在左下，需垂直翻轉寫回 2D canvas
+      const out = document.createElement('canvas');
+      out.width = W; out.height = H;
+      const ctx = out.getContext('2d');
+      const imgData = ctx.createImageData(W, H);
+      for (let y = 0; y < H; y++) {
+        const srcRow = H - 1 - y; // 翻轉
+        imgData.data.set(
+          pixels.subarray(srcRow * W * 4, (srcRow + 1) * W * 4),
+          y * W * 4
+        );
+      }
+      ctx.putImageData(imgData, 0, 0);
+
+      const blob = await new Promise(res => out.toBlob(res, 'image/png'));
+      if (!blob) throw new Error('輸出 Blob 失敗');
+      return blob;
+    }
+
+    let ready = false;
+    viewer.on('load', ()=>{ ready = true; });
+
+    captureBtn.addEventListener('click', async ()=>{
+      try{
+        if (!ready){ setBadge('圖片載入中…', true); return; }
+        setBadge('擷取中…', true);
+        const blob = await hardCapturePannellum(viewer);
+        showPreviewWithBlob(blob);
+        setBadge('已擷取', true);
+        setTimeout(()=>setBadge('', false), 800);
+      }catch(err){
+        setBadge('', false);
+        alert('拍照失敗：' + (err && err.message ? err.message : err));
+      }
+    });
+
+    closeBtn.addEventListener('click', hidePreview);
+    retakeBtn.addEventListener('click', hidePreview);
+  </script>
+</body>
+</html>
